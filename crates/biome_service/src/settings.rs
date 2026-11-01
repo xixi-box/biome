@@ -1513,8 +1513,15 @@ impl VcsIgnoredPatterns {
         path: &Utf8Path,
         is_dir: bool,
     ) -> bool {
-        let root_ignored = {
-            let path = path.strip_prefix(root.path()).unwrap_or(path);
+        let root_ignored = if let Ok(stripped_path) = path.strip_prefix(root.path()) {
+            root.matched_path_or_any_parents(stripped_path, is_dir)
+                .is_ignore()
+        } else if path.is_absolute() {
+            // The module graph can reach absolute paths outside the ignore
+            // file's root, such as dependencies outside the project.
+            // `matched_path_or_any_parents` panics on those.
+            false
+        } else {
             root.matched_path_or_any_parents(path, is_dir).is_ignore()
         };
 
