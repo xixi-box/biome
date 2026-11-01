@@ -5,6 +5,7 @@ use biome_diagnostics::Severity;
 use biome_js_syntax::{
     AnyJsIdentifierReference, JsExportNamedSpecifier, binding_ext::AnyJsIdentifierBinding,
 };
+use biome_languages::JsFileSource;
 use biome_rowan::{AstNode, TextRange};
 use biome_rule_options::use_filenaming_convention::UseFilenamingConventionOptions;
 use biome_string_case::Case;
@@ -154,6 +155,14 @@ impl Rule for UseFilenamingConvention {
     type Options = UseFilenamingConventionOptions;
 
     fn run(ctx: &RuleContext<Self>) -> Self::Signals {
+        // The filename is a property of the host file. Only check it from the
+        // snippets that define bindings; template expressions and other
+        // non-source snippets would otherwise report the same filename once per
+        // snippet.
+        let source_type = ctx.source_type::<JsFileSource>();
+        if source_type.is_embedded() && !source_type.is_embedded_source() {
+            return None;
+        }
         let file_name = ctx.file_path().file_name()?;
         let options = ctx.options();
         if options.require_ascii() && !file_name.is_ascii() {
