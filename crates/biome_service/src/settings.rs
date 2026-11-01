@@ -1013,12 +1013,9 @@ impl LinterSettings {
         self.rules
             .as_ref()
             .and_then(|rules| {
-                rules.recommended.or(Some(
-                    rules
-                        .preset
-                        .as_ref()
-                        .is_some_and(|preset| preset.is_recommended()),
-                ))
+                rules
+                    .recommended
+                    .or_else(|| rules.preset.as_ref().map(|preset| preset.is_recommended()))
             })
             // If there isn't a clear value, we default to true
             .unwrap_or(true)
