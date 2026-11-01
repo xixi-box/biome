@@ -50,6 +50,15 @@ impl SemanticModel {
         GlobalCustomVariables { data: &self.data }
     }
 
+    /// Returns declarations that are not contained in a rule, such as
+    /// declarations in a `style` attribute or a styled-components template.
+    pub fn root_declarations(&self) -> impl Iterator<Item = CssModelDeclaration> + '_ {
+        self.data
+            .root_declarations
+            .iter()
+            .map(|declaration| CssModelDeclaration::from_data(self.data.clone(), declaration))
+    }
+
     /// Returns declarations that assign values to custom properties.
     pub fn custom_property_declarations(&self) -> impl Iterator<Item = CssModelDeclaration> + '_ {
         self.data

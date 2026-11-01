@@ -255,7 +255,9 @@ impl SemanticModelBuilder {
                         self.all_rules[current_rule_id.index()]
                             .declarations
                             .push(declaration);
-                    } else if self.root.as_css_declaration_snippet_root().is_some() {
+                    } else if self.root.as_css_declaration_snippet_root().is_some()
+                        || self.root.as_css_snippet_root().is_some()
+                    {
                         self.root_declarations.push(declaration);
                     }
                 }

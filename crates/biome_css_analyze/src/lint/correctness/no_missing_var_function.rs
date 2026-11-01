@@ -181,21 +181,9 @@ impl Rule for NoMissingVarFunction {
         }
 
         let model = ctx.model();
-        let rule = model.get_rule_by_range(node.range())?;
 
-        if rule
-            .declarations()
-            .iter()
-            .flat_map(|decl| decl.property().value())
-            .any(|value| value.text() == custom_variable_name.text())
-        {
-            return Some(node.clone());
-        }
-
-        let mut parent_id = rule.parent_id();
-        while let Some(id) = parent_id {
-            let parent_rule = model.get_rule_by_id(&id)?;
-            if parent_rule
+        if let Some(rule) = model.get_rule_by_range(node.range()) {
+            if rule
                 .declarations()
                 .iter()
                 .flat_map(|decl| decl.property().value())
@@ -203,7 +191,28 @@ impl Rule for NoMissingVarFunction {
             {
                 return Some(node.clone());
             }
-            parent_id = parent_rule.parent_id();
+
+            let mut parent_id = rule.parent_id();
+            while let Some(id) = parent_id {
+                let parent_rule = model.get_rule_by_id(&id)?;
+                if parent_rule
+                    .declarations()
+                    .iter()
+                    .flat_map(|decl| decl.property().value())
+                    .any(|value| value.text() == custom_variable_name.text())
+                {
+                    return Some(node.clone());
+                }
+                parent_id = parent_rule.parent_id();
+            }
+        }
+
+        if model
+            .root_declarations()
+            .flat_map(|decl| decl.property().value())
+            .any(|value| value.text() == custom_variable_name.text())
+        {
+            return Some(node.clone());
         }
 
         if model
