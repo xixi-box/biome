@@ -2083,7 +2083,7 @@ impl OverrideSettingPattern {
     /// Note that only path to regular files should be passed.
     /// This function doesn't take directories into account.
     pub fn is_file_included(&self, file_path: &Utf8Path) -> bool {
-        !self.includes.is_unset() && self.includes.matches(file_path)
+        self.includes.matches(file_path)
     }
 
     #[cfg(feature = "lang_js")]
