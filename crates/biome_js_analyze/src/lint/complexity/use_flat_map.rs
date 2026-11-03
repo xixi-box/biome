@@ -75,6 +75,9 @@ impl Rule for UseFlatMap {
         }
         let flat_member_expression =
             AnyJsMemberExpression::cast(flat_call.callee().ok()?.into_syntax())?;
+        if flat_call.is_optional() || is_optional_member(&flat_member_expression) {
+            return None;
+        }
         if flat_member_expression.member_name()?.text() == "flat" {
             let Ok(AnyJsExpression::JsCallExpression(map_call)) = flat_member_expression.object()
             else {
@@ -133,5 +136,12 @@ impl Rule for UseFlatMap {
             markup! {"Replace the chain with "<Emphasis>".flatMap()"</Emphasis>"."}.to_owned(),
             mutation,
         ))
+    }
+}
+
+fn is_optional_member(member: &AnyJsMemberExpression) -> bool {
+    match member {
+        AnyJsMemberExpression::JsStaticMemberExpression(member) => member.is_optional(),
+        AnyJsMemberExpression::JsComputedMemberExpression(member) => member.is_optional(),
     }
 }
