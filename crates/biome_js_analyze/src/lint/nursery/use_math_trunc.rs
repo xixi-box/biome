@@ -7,10 +7,11 @@ use biome_diagnostics::Severity;
 use biome_js_factory::make;
 use biome_js_semantic::SemanticModel;
 use biome_js_syntax::{
-    AnyJsArrayElement, AnyJsAssignment, AnyJsCallArgument, AnyJsExpression, AnyJsTemplateElement,
-    JsAssignmentExpression, JsAssignmentOperator, JsBinaryExpression, JsBinaryOperator,
-    JsCallArguments, JsCallExpression, JsLanguage, JsSyntaxKind, JsUnaryExpression,
-    JsUnaryOperator, T, global_identifier,
+    AnyJsArrayElement, AnyJsAssignment, AnyJsCallArgument, AnyJsExpression, AnyJsFormalParameter,
+    AnyJsLiteralExpression, AnyJsTemplateElement, AnyTsType, JsAssignmentExpression,
+    JsAssignmentOperator, JsBinaryExpression, JsBinaryOperator, JsCallArguments, JsCallExpression,
+    JsFormalParameter, JsInitializerClause, JsLanguage, JsSyntaxKind, JsUnaryExpression,
+    JsUnaryOperator, T, binding_ext::AnyJsBindingDeclaration, global_identifier,
 };
 use biome_rowan::{
     AstNode, AstSeparatedList, BatchMutation, BatchMutationExt, Direction, TextRange,
@@ -109,7 +110,11 @@ impl Rule for UseMathTrunc {
     type Options = UseMathTruncOptions;
 
     fn run(ctx: &RuleContext<Self>) -> Self::Signals {
-        match ctx.query() {
+        let candidate = ctx.query();
+        if has_shadowed_math(ctx.model(), candidate) {
+            return None;
+        }
+        match candidate {
             AnyJsTruncationCandidate::JsBinaryExpression(binary) => {
                 let operator = binary.operator().ok()?;
                 (TRUNCATING_BINARY_OPERATORS.contains(&operator) && is_zero(&binary.right().ok()?))
@@ -122,7 +127,9 @@ impl Rule for UseMathTrunc {
                 .then_some(TruncationPattern::BitwiseOperator)
             }
             AnyJsTruncationCandidate::JsUnaryExpression(unary) => {
-                double_bitwise_not_operand(unary).map(TruncationPattern::DoubleBitwiseNot)
+                let operand = double_bitwise_not_operand(unary)?;
+                (!is_bigint(&operand, ctx.model()))
+                    .then_some(TruncationPattern::DoubleBitwiseNot(operand))
             }
             AnyJsTruncationCandidate::JsCallExpression(call) => {
                 let function = parse_int_function(call, ctx.model())?;
@@ -390,11 +397,14 @@ fn string_call_arguments(
         return None;
     }
     let arguments = string_call.arguments().ok()?;
-    let [Some(AnyJsCallArgument::AnyJsExpression(_)), None] =
+    let [Some(AnyJsCallArgument::AnyJsExpression(value)), None] =
         arguments.get_arguments_by_index([0, 1])
     else {
         return None;
     };
+    if is_bigint(&value, model) {
+        return None;
+    }
     Some(arguments)
 }
 
@@ -407,6 +417,146 @@ fn is_global(expression: &AnyJsExpression, name: &str, model: &SemanticModel) ->
         .is_some_and(|(reference, global_name)| {
             global_name.text() == name && model.binding(&reference).is_none()
         })
+}
+
+/// Returns whether a declaration named `Math` is visible from `candidate`, which means that
+/// `Math` doesn't refer to the built-in object there.
+fn has_shadowed_math(model: &SemanticModel, candidate: &AnyJsTruncationCandidate) -> bool {
+    model.scope(candidate.syntax()).ancestors().any(|scope| {
+        scope
+            .get_binding("Math")
+            .is_some_and(|binding| binding.tree().declaration().is_some())
+    })
+}
+
+/// Returns whether the code shows that `expression` is a `bigint`, either in the expression
+/// itself or in the declaration of the variable or parameter that it reads.
+///
+/// `Math.trunc()` throws a `TypeError` for a `bigint`, so the fix must not target one.
+fn is_bigint(expression: &AnyJsExpression, model: &SemanticModel) -> bool {
+    is_bigint_expression(expression) || has_bigint_declaration(expression, model).unwrap_or(false)
+}
+
+/// Returns whether `expression` is a bigint literal, a `BigInt()` call, or a TypeScript type
+/// assertion to a type that includes `bigint`.
+fn is_bigint_expression(expression: &AnyJsExpression) -> bool {
+    let mut expression = expression.clone();
+    loop {
+        let (inner, ty) = match expression.omit_parentheses() {
+            AnyJsExpression::AnyJsLiteralExpression(
+                AnyJsLiteralExpression::JsBigintLiteralExpression(_),
+            ) => return true,
+            AnyJsExpression::JsCallExpression(call) => return is_bigint_call(&call),
+            AnyJsExpression::JsUnaryExpression(unary)
+                if matches!(unary.operator(), Ok(JsUnaryOperator::Minus)) =>
+            {
+                (unary.argument(), None)
+            }
+            AnyJsExpression::TsNonNullAssertionExpression(assertion) => {
+                (assertion.expression(), None)
+            }
+            AnyJsExpression::TsAsExpression(assertion) => {
+                (assertion.expression(), assertion.ty().ok())
+            }
+            AnyJsExpression::TsSatisfiesExpression(assertion) => {
+                (assertion.expression(), assertion.ty().ok())
+            }
+            AnyJsExpression::TsTypeAssertionExpression(assertion) => {
+                (assertion.expression(), assertion.ty().ok())
+            }
+            _ => return false,
+        };
+        if ty.is_some_and(is_bigint_type) {
+            return true;
+        }
+        let Ok(inner) = inner else {
+            return false;
+        };
+        expression = inner;
+    }
+}
+
+/// Returns whether `call` invokes `BigInt()`.
+fn is_bigint_call(call: &JsCallExpression) -> bool {
+    !call.is_optional()
+        && call.callee().is_ok_and(|callee| {
+            callee
+                .omit_parentheses()
+                .as_js_identifier_expression()
+                .and_then(|identifier| identifier.name().ok())
+                .is_some_and(|name| name.has_name("BigInt"))
+        })
+}
+
+/// Returns whether `ty` is `bigint`, a bigint literal type such as `1n`, or a union or
+/// intersection that contains one of them.
+fn is_bigint_type(ty: AnyTsType) -> bool {
+    let mut types = vec![ty];
+    while let Some(ty) = types.pop() {
+        match ty {
+            AnyTsType::TsBigintType(_) | AnyTsType::TsBigintLiteralType(_) => return true,
+            AnyTsType::TsParenthesizedType(parenthesized) => types.extend(parenthesized.ty().ok()),
+            AnyTsType::TsUnionType(union) => types.extend(union.types().iter().flatten()),
+            AnyTsType::TsIntersectionType(intersection) => {
+                types.extend(intersection.types().iter().flatten());
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Returns whether `expression` reads a variable or parameter whose type annotation, initial
+/// value, or default value is a `bigint`.
+fn has_bigint_declaration(expression: &AnyJsExpression, model: &SemanticModel) -> Option<bool> {
+    let expression = expression.clone().omit_type_wrappers()?;
+    let reference = expression.as_js_identifier_expression()?.name().ok()?;
+    let declaration = model.binding(&reference)?.tree().declaration()?;
+
+    let (ty, initializer) = match declaration {
+        AnyJsBindingDeclaration::JsFormalParameter(parameter) => parameter_metadata(&parameter),
+        AnyJsBindingDeclaration::TsPropertyParameter(parameter) => {
+            match parameter.formal_parameter().ok()? {
+                AnyJsFormalParameter::JsFormalParameter(parameter) => {
+                    parameter_metadata(&parameter)
+                }
+                _ => return Some(false),
+            }
+        }
+        AnyJsBindingDeclaration::JsVariableDeclarator(declarator) => (
+            declarator
+                .variable_annotation()
+                .and_then(|annotation| annotation.type_annotation().ok()??.ty().ok()),
+            declarator.initializer(),
+        ),
+        AnyJsBindingDeclaration::JsObjectBindingPatternShorthandProperty(property) => {
+            (None, property.init())
+        }
+        AnyJsBindingDeclaration::JsObjectBindingPatternProperty(property) => {
+            (None, property.init())
+        }
+        AnyJsBindingDeclaration::JsArrayBindingPatternElement(element) => (None, element.init()),
+        _ => return Some(false),
+    };
+
+    Some(
+        ty.is_some_and(is_bigint_type)
+            || initializer
+                .and_then(|initializer| initializer.expression().ok())
+                .is_some_and(|expression| is_bigint_expression(&expression)),
+    )
+}
+
+/// Returns the type annotation and the default value of `parameter`.
+fn parameter_metadata(
+    parameter: &JsFormalParameter,
+) -> (Option<AnyTsType>, Option<JsInitializerClause>) {
+    (
+        parameter
+            .type_annotation()
+            .and_then(|annotation| annotation.ty().ok()),
+        parameter.initializer(),
+    )
 }
 
 /// Returns `target` as an expression when reading it has no side effects, such as
